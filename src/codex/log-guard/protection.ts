@@ -121,6 +121,7 @@ interface TriggerRow {
   sql: string | null;
 }
 interface ColumnRow { name: string }
+interface OwnedTriggerSnapshot { name: string; sql: string }
 
 type LockedMutationResult =
   | { ok: true }
@@ -255,11 +256,10 @@ function processRefusal(check: CodexWriterProcessCheck): CodexLogGuardMutationEr
   return null;
 }
 
-
 function mutateOwnedTrigger(
   databasePath: string,
   mode: CodexLogGuardMode,
-): { ok: true; previousMode: CodexLogGuardMode } | { ok: false; error: CodexLogGuardMutationError } {
+): { ok: true; previousTriggers: readonly OwnedTriggerSnapshot[] } | { ok: false; error: CodexLogGuardMutationError } {
   let db: Database | undefined;
   let transactionOpen = false;
   try {
@@ -280,7 +280,10 @@ function mutateOwnedTrigger(
       transactionOpen = false;
       return { ok: false, error: "trigger_collision" };
     }
-    const previousMode: CodexLogGuardMode = modes[0] ?? "off";
+    const previousTriggers: OwnedTriggerSnapshot[] = rows.map(row => ({
+      name: row.name,
+      sql: row.sql!,
+    }));
 
     for (const row of rows) {
       // Name is from our fixed allow-list; never interpolate arbitrary sqlite_master data.
@@ -292,7 +295,7 @@ function mutateOwnedTrigger(
     if (observed !== mode) throw new Error("log_guard_trigger_verification_failed");
     db.exec("COMMIT");
     transactionOpen = false;
-    return { ok: true, previousMode };
+    return { ok: true, previousTriggers };
   } catch (error) {
     if (transactionOpen) {
       try { db?.exec("ROLLBACK"); } catch { /* close releases the transaction */ }
@@ -304,11 +307,51 @@ function mutateOwnedTrigger(
   }
 }
 
-function restoreOwnedTrigger(databasePath: string, mode: CodexLogGuardMode): void {
+function restoreOwnedTriggers(databasePath: string, previousTriggers: readonly OwnedTriggerSnapshot[]): void {
   // Best-effort compensation only. Failure is deliberately not hidden by
   // claiming success; the caller returns config_write_failed and status will
   // expose any remaining drift on the next read.
-  mutateOwnedTrigger(databasePath, mode);
+  let db: Database | undefined;
+  let transactionOpen = false;
+  try {
+    if (!databasePathIsSafe(databasePath)) return;
+    db = openReadWrite(databasePath);
+    db.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
+    transactionOpen = true;
+    if (!exactCurrentSchema(db)) {
+      db.exec("ROLLBACK");
+      transactionOpen = false;
+      return;
+    }
+
+    const current = queryReservedTriggers(db);
+    if (current.some(row => ownedModeForRow(row) === null)) {
+      db.exec("ROLLBACK");
+      transactionOpen = false;
+      return;
+    }
+    for (const row of current) db.exec(`DROP TRIGGER ${row.name}`);
+
+    for (const trigger of previousTriggers) {
+      if (ownedModeForRow(trigger) === null) throw new Error("invalid_owned_trigger_snapshot");
+      db.exec(trigger.sql);
+    }
+
+    const restored = queryReservedTriggers(db);
+    const expected = new Map(previousTriggers.map(row => [row.name, normalizeSql(row.sql)]));
+    if (restored.length !== previousTriggers.length
+      || restored.some(row => expected.get(row.name) !== normalizeSql(row.sql))) {
+      throw new Error("log_guard_trigger_restore_verification_failed");
+    }
+    db.exec("COMMIT");
+    transactionOpen = false;
+  } catch {
+    if (transactionOpen) {
+      try { db?.exec("ROLLBACK"); } catch { /* close releases the transaction */ }
+    }
+  } finally {
+    try { db?.close(); } catch { /* compensation already settled */ }
+  }
 }
 
 function performMutation(
@@ -346,7 +389,7 @@ function performMutation(
       try {
         writeDesired(requestedMode);
       } catch {
-        restoreOwnedTrigger(databasePath, mutation.previousMode);
+        restoreOwnedTriggers(databasePath, mutation.previousTriggers);
         return { ok: false, error: "config_write_failed" as const };
       }
       return { ok: true };
