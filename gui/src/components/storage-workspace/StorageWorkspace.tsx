@@ -159,6 +159,15 @@ function CodexLogGuardPanel({ report, locale, t }: { report: CodexLogGuardReport
   );
 }
 
+function CodexLogGuardUnavailablePanel({ locale, t }: { locale: Locale; t: TFn }) {
+  return (
+    <div className="stw-section" data-testid="codex-log-guard-unavailable">
+      <h3 className="stw-section-title">{t("storage.bucket.logs_db")}</h3>
+      <p className="stw-hint">{logGuardLabel(locale, "inspectionUnavailable")}</p>
+    </div>
+  );
+}
+
 export interface StorageWorkspaceProps {
   report: StorageReport;
   locale: Locale;
@@ -283,7 +292,11 @@ export default function StorageWorkspace({ report, locale }: StorageWorkspacePro
               </div>
             </div>
 
-            {report.codexLogs && <CodexLogGuardPanel report={report.codexLogs} locale={locale} t={t} />}
+            {report.codexLogs ? (
+              <CodexLogGuardPanel report={report.codexLogs} locale={locale} t={t} />
+            ) : report.codexLogsError === "inspect_failed" ? (
+              <CodexLogGuardUnavailablePanel locale={locale} t={t} />
+            ) : null}
 
             {largestAcross.length > 0 ? (
               <div className="stw-section">
