@@ -12,22 +12,30 @@ import {
 
 const IMMUTABLE_READONLY_FLAGS = constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI;
 
-// Pinned to Codex logs migration 0002. Keep this list private: inspection reports schema
+interface CurrentLogColumn {
+  name: string;
+  type: string;
+  notnull: number;
+  defaultValue: string | null;
+  pk: number;
+}
+
+// Pinned to Codex logs migration 0002. Keep this schema private: inspection reports
 // compatibility, not column names, so sensitive payload-bearing fields never leak through
 // the management API. Any additive/rebuilt future schema is monitor-only until reviewed.
-const CURRENT_LOG_COLUMNS = [
-  "id",
-  "ts",
-  "ts_nanos",
-  "level",
-  "target",
-  "feedback_log_body",
-  "module_path",
-  "file",
-  "line",
-  "thread_id",
-  "process_uuid",
-  "estimated_bytes",
+const CURRENT_LOG_SCHEMA: readonly CurrentLogColumn[] = [
+  { name: "id", type: "INTEGER", notnull: 0, defaultValue: null, pk: 1 },
+  { name: "ts", type: "INTEGER", notnull: 1, defaultValue: null, pk: 0 },
+  { name: "ts_nanos", type: "INTEGER", notnull: 1, defaultValue: null, pk: 0 },
+  { name: "level", type: "TEXT", notnull: 1, defaultValue: null, pk: 0 },
+  { name: "target", type: "TEXT", notnull: 1, defaultValue: null, pk: 0 },
+  { name: "feedback_log_body", type: "TEXT", notnull: 0, defaultValue: null, pk: 0 },
+  { name: "module_path", type: "TEXT", notnull: 0, defaultValue: null, pk: 0 },
+  { name: "file", type: "TEXT", notnull: 0, defaultValue: null, pk: 0 },
+  { name: "line", type: "INTEGER", notnull: 0, defaultValue: null, pk: 0 },
+  { name: "thread_id", type: "TEXT", notnull: 0, defaultValue: null, pk: 0 },
+  { name: "process_uuid", type: "TEXT", notnull: 0, defaultValue: null, pk: 0 },
+  { name: "estimated_bytes", type: "INTEGER", notnull: 1, defaultValue: "0", pk: 0 },
 ] as const;
 
 export type CodexLogGuardCapabilityReason =
@@ -82,7 +90,15 @@ export interface CodexLogGuardInspection {
   metrics: CodexLogGuardMetrics | null;
 }
 
-interface ColumnRow { name: string }
+interface ColumnRow {
+  cid: number;
+  name: string;
+  type: string;
+  notnull: number;
+  dflt_value: string | null;
+  pk: number;
+}
+interface SchemaObjectRow { type: string }
 interface CountRow { n: number }
 interface LevelRow { level: string; rows: number }
 interface TargetRow { target: string; rows: number }
@@ -110,11 +126,32 @@ function capabilityFor(schema: CodexLogGuardSchemaState): CodexLogGuardCapabilit
   return { state: "unsupported", reason: schema.reason };
 }
 
-function sameColumns(columns: string[]): boolean {
-  if (columns.length !== CURRENT_LOG_COLUMNS.length) return false;
-  const expected = [...CURRENT_LOG_COLUMNS].sort();
-  const actual = [...columns].sort();
-  return actual.every((column, index) => column === expected[index]);
+function normalizeDeclaredType(type: string): string {
+  return String(type ?? "").trim().toUpperCase();
+}
+
+function normalizeDefault(value: string | null): string | null {
+  return value === null ? null : String(value).trim();
+}
+
+function sameColumns(columns: ColumnRow[]): boolean {
+  if (columns.length !== CURRENT_LOG_SCHEMA.length) return false;
+  return columns.every((column, index) => {
+    const expected = CURRENT_LOG_SCHEMA[index];
+    return column.cid === index
+      && column.name === expected.name
+      && normalizeDeclaredType(column.type) === expected.type
+      && Number(column.notnull) === expected.notnull
+      && normalizeDefault(column.dflt_value) === expected.defaultValue
+      && Number(column.pk) === expected.pk;
+  });
+}
+
+function hasCurrentLogsTable(db: Database, columns: ColumnRow[]): boolean {
+  const object = db.query<SchemaObjectRow, []>(
+    "SELECT type FROM sqlite_schema WHERE name = 'logs' LIMIT 1",
+  ).get();
+  return object?.type === "table" && sameColumns(columns);
 }
 
 function pragmaNumber(db: Database, pragma: "page_size" | "page_count" | "freelist_count"): number {
@@ -231,8 +268,9 @@ export function inspectCodexLogs(deps: CodexSqliteHomeDeps = {}): CodexLogGuardI
     const uri = `${pathToFileURL(databasePath).href}?immutable=1`;
     const db = new Database(uri, IMMUTABLE_READONLY_FLAGS);
     try {
-      const columns = db.query<ColumnRow, []>("PRAGMA table_info(logs)").all().map(row => row.name);
-      const schema: CodexLogGuardSchemaState = sameColumns(columns)
+      const columnRows = db.query<ColumnRow, []>("PRAGMA table_info(logs)").all();
+      const columns = columnRows.map(row => row.name);
+      const schema: CodexLogGuardSchemaState = hasCurrentLogsTable(db, columnRows)
         ? { state: "compatible" }
         : { state: "unsupported", reason: "unknown_schema" };
       const mutation = capabilityFor(schema);
