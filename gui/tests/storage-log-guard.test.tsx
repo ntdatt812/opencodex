@@ -54,9 +54,12 @@ test("Storage overview renders read-only Codex diagnostic log health", () => {
   expect(html).toContain("compatible");
   expect(html).toContain("400");
   expect(html).toContain("50.0%");
-  expect(html).toContain("8 KB");
-  expect(html).toContain("2 KB");
-  expect(html).toContain("4 KB");
+  expect(html).toContain("8 KiB");
+  expect(html).toContain("2 KiB");
+  expect(html).toContain("4 KiB");
+  expect(html).toContain("WAL");
+  expect(html).toContain("SHM");
+  expect(html).toContain("0 B");
   expect(html).toContain("codex_api::sse");
   expect(html).toContain("External SQLite storage");
   expect(html).toContain("snapshot=checkpointed");
