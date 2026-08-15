@@ -11,6 +11,8 @@ import { useT, type TFn, type TKey, type Locale } from "../../i18n/shared";
 import { logGuardLabel } from "../../i18n/log-guard-labels";
 import { formatBytes } from "../../format-bytes";
 
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+
 export interface StorageLargestEntry {
   path: string;
   bytes: number;
@@ -35,6 +37,12 @@ type LogGuardSchema =
   | { state: "unreadable"; reason: "database_unreadable" }
   | { state: "unsupported"; reason: "unknown_schema" };
 
+export interface CodexLogGuardProtection {
+  desiredMode: "off" | "compat" | "quiet";
+  observedMode: "off" | "compat" | "quiet" | "collision";
+  state: "off" | "active" | "drifted" | "unsupported" | "unknown";
+}
+
 export interface CodexLogGuardReport {
   generatedAt: number;
   externalSqliteHome: boolean;
@@ -46,6 +54,7 @@ export interface CodexLogGuardReport {
     protection: LogGuardCapability;
     reclaim: LogGuardCapability;
   };
+  protection?: CodexLogGuardProtection;
   metrics: null | {
     totalRows: number;
     rowsByLevel: Record<string, number>;
@@ -69,6 +78,11 @@ export interface StorageReport {
   codexLogsError?: string;
   error?: string;
 }
+
+export type CodexLogGuardAction =
+  | { action: "protect"; mode: "compat" | "quiet" }
+  | { action: "unprotect" }
+  | { action: "repair" };
 
 // Known scanner bucket keys → localized labels; unknown future keys fall back to the API label.
 const BUCKET_TKEYS: Record<string, TKey> = {
@@ -96,10 +110,40 @@ function rowsDisplay(bucket: StorageBucket, locale: Locale, t: TFn): string {
   return bucket.rows.toLocaleString(locale);
 }
 
-function CodexLogGuardPanel({ report, locale, t }: { report: CodexLogGuardReport; locale: Locale; t: TFn }) {
+function mutationErrorLabel(locale: Locale, code: unknown): string {
+  switch (code) {
+    case "codex_running": return logGuardLabel(locale, "error.codex_running");
+    case "process_enumeration_failed": return logGuardLabel(locale, "error.process_enumeration_failed");
+    case "busy": return logGuardLabel(locale, "error.busy");
+    case "unsupported_schema": return logGuardLabel(locale, "error.unsupported_schema");
+    case "trigger_collision": return logGuardLabel(locale, "error.trigger_collision");
+    case "unsafe_path": return logGuardLabel(locale, "error.unsafe_path");
+    case "database_error": return logGuardLabel(locale, "error.database_error");
+    case "config_write_failed": return logGuardLabel(locale, "error.config_write_failed");
+    default: return logGuardLabel(locale, "error.generic");
+  }
+}
+
+function CodexLogGuardPanel({
+  report,
+  locale,
+  t,
+  busy,
+  error,
+  onAction,
+}: {
+  report: CodexLogGuardReport;
+  locale: Locale;
+  t: TFn;
+  busy: boolean;
+  error: string | null;
+  onAction: (action: CodexLogGuardAction) => void;
+}) {
   const metrics = report.metrics;
   const inspectOnly = report.capabilities.protection.state === "unsupported"
     || report.capabilities.reclaim.state === "unsupported";
+  const protection = report.protection;
+  const mutationDisabled = busy || report.capabilities.protection.state !== "supported";
 
   return (
     <div className="stw-section" data-testid="codex-log-guard">
@@ -143,6 +187,64 @@ function CodexLogGuardPanel({ report, locale, t }: { report: CodexLogGuardReport
           </dd>
         </div>
       </dl>
+
+      {protection && (
+        <div className="stw-section" data-testid="log-guard-protection">
+          <h4 className="stw-section-title">{logGuardLabel(locale, "protection")}</h4>
+          <div className="stw-kv-row">
+            <span className="muted"><code>{protection.state}</code></span>
+            <span className="stw-kv-mono">
+              <code>{protection.desiredMode}</code>
+              {protection.observedMode !== protection.desiredMode ? <><span aria-hidden="true"> · </span><code>{protection.observedMode}</code></> : null}
+            </span>
+          </div>
+          <div className="storage-policy-actions">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              data-testid="log-guard-protect-compat"
+              disabled={mutationDisabled}
+              aria-pressed={protection.desiredMode === "compat"}
+              onClick={() => onAction({ action: "protect", mode: "compat" })}
+            >
+              {logGuardLabel(locale, "compat")}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              data-testid="log-guard-protect-quiet"
+              disabled={mutationDisabled}
+              aria-pressed={protection.desiredMode === "quiet"}
+              onClick={() => onAction({ action: "protect", mode: "quiet" })}
+            >
+              {logGuardLabel(locale, "quiet")}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              data-testid="log-guard-unprotect"
+              disabled={mutationDisabled || protection.desiredMode === "off"}
+              onClick={() => onAction({ action: "unprotect" })}
+            >
+              {logGuardLabel(locale, "disable")}
+            </button>
+            {protection.state === "drifted" && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                data-testid="log-guard-repair"
+                disabled={mutationDisabled}
+                onClick={() => onAction({ action: "repair" })}
+              >
+                {logGuardLabel(locale, "repair")}
+              </button>
+            )}
+            {busy && <span className="muted" role="status">{logGuardLabel(locale, "applying")}</span>}
+          </div>
+          {error && <p className="err" role="alert">{error}</p>}
+        </div>
+      )}
+
       {metrics && metrics.topTargets.length > 0 && (
         <div className="stw-section">
           <h4 className="stw-section-title"><code>target</code></h4>
@@ -171,17 +273,44 @@ function CodexLogGuardUnavailablePanel({ locale, t }: { locale: Locale; t: TFn }
 export interface StorageWorkspaceProps {
   report: StorageReport;
   locale: Locale;
+  logGuardBusy?: boolean;
+  onLogGuardAction?: (action: CodexLogGuardAction) => void;
 }
 
-export default function StorageWorkspace({ report, locale }: StorageWorkspaceProps) {
+type GenerationScopedLogGuardReport = {
+  generation: number;
+  report: CodexLogGuardReport;
+};
+
+type GenerationScopedError = {
+  generation: number;
+  message: string;
+};
+
+export default function StorageWorkspace({
+  report,
+  locale,
+  logGuardBusy = false,
+  onLogGuardAction,
+}: StorageWorkspaceProps) {
   const t = useT();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [logGuardOverride, setLogGuardOverride] = useState<GenerationScopedLogGuardReport | null>(null);
+  const [internalLogGuardBusy, setInternalLogGuardBusy] = useState(false);
+  const [logGuardError, setLogGuardError] = useState<GenerationScopedError | null>(null);
 
   const sortedBuckets = useMemo(
     () => report.buckets.toSorted((a, b) => b.bytes - a.bytes),
     [report.buckets],
   );
   const selected = sortedBuckets.find(b => b.key === selectedKey) ?? null;
+  const displayedLogGuard = logGuardOverride?.generation === report.generatedAt
+    ? logGuardOverride.report
+    : report.codexLogs ?? null;
+  const displayedLogGuardError = logGuardError?.generation === report.generatedAt
+    ? logGuardError.message
+    : null;
+  const effectiveLogGuardBusy = logGuardBusy || internalLogGuardBusy;
 
   const largestAcross = useMemo(() => {
     const rows: Array<StorageLargestEntry & { bucketKey: string }> = [];
@@ -195,6 +324,41 @@ export default function StorageWorkspace({ report, locale }: StorageWorkspacePro
     () => new Map(report.buckets.map(b => [b.key, b])),
     [report.buckets],
   );
+
+  const runLogGuardAction = (action: CodexLogGuardAction) => {
+    if (onLogGuardAction) {
+      onLogGuardAction(action);
+      return;
+    }
+    if (internalLogGuardBusy) return;
+    const generation = report.generatedAt;
+    void (async () => {
+      setInternalLogGuardBusy(true);
+      setLogGuardError(null);
+      try {
+        const suffix = action.action === "protect" ? "protect" : action.action;
+        const init: RequestInit = {
+          method: "POST",
+          ...(action.action === "protect" ? {
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: action.mode }),
+          } : {}),
+        };
+        const response = await fetch(`${API_BASE}/api/storage/codex-logs/${suffix}`, init);
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => ({})) as Record<string, unknown>;
+          setLogGuardError({ generation, message: mutationErrorLabel(locale, errorPayload.error) });
+          return;
+        }
+        const payload = await response.json() as CodexLogGuardReport;
+        setLogGuardOverride({ generation, report: payload });
+      } catch {
+        setLogGuardError({ generation, message: logGuardLabel(locale, "error.generic") });
+      } finally {
+        setInternalLogGuardBusy(false);
+      }
+    })();
+  };
 
   return (
     <div className="storage-workspace-root">
@@ -292,8 +456,15 @@ export default function StorageWorkspace({ report, locale }: StorageWorkspacePro
               </div>
             </div>
 
-            {report.codexLogs ? (
-              <CodexLogGuardPanel report={report.codexLogs} locale={locale} t={t} />
+            {displayedLogGuard ? (
+              <CodexLogGuardPanel
+                report={displayedLogGuard}
+                locale={locale}
+                t={t}
+                busy={effectiveLogGuardBusy}
+                error={displayedLogGuardError}
+                onAction={runLogGuardAction}
+              />
             ) : report.codexLogsError === "inspect_failed" ? (
               <CodexLogGuardUnavailablePanel locale={locale} t={t} />
             ) : null}
