@@ -88,6 +88,7 @@ describe("Codex Log Guard status remains zero-write", () => {
     // Closing the last SQLite connection normally checkpoints/removes WAL/SHM.
     // Restore the genuine WAL bytes without an SHM file so the status read must
     // prove it does not join/materialise SQLite's WAL protocol.
+    rmSync(shm, { force: true });
     writeFileSync(wal, liveWal);
     expect(existsSync(wal)).toBe(true);
     expect(existsSync(shm)).toBe(false);

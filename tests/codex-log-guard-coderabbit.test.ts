@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { sameLogGuardPathIdentity } from "../src/codex/log-guard/path-safety";
 import {
   getCodexLogGuardProtectionStatus,
   protectCodexLogs,
@@ -68,6 +69,17 @@ function deps(codexHome: string, writeDesiredMode?: (mode: "off" | "compat" | "q
   };
 }
 
+function reservedTriggers(databasePath: string): Array<{ name: string; sql: string }> {
+  const db = new Database(databasePath, { readonly: true });
+  try {
+    return db.query<{ name: string; sql: string }, []>(
+      "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'opencodex_log_guard_%' ORDER BY name",
+    ).all();
+  } finally {
+    db.close();
+  }
+}
+
 describe("CodeRabbit protection regressions", () => {
   test("compatible but unsafe trigger path reports unknown protection state", () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-log-guard-cr-symlink-"));
@@ -82,6 +94,27 @@ describe("CodeRabbit protection regressions", () => {
     const status = getCodexLogGuardProtectionStatus(deps(codexHome));
     expect(status.schema.state).toBe("compatible");
     expect(status.protection).toEqual({ desiredMode: "off", observedMode: "collision", state: "unknown" });
+  });
+
+  test("Darwin accepts only the trusted system alias and rejects an arbitrary ancestor symlink", () => {
+    if (process.platform !== "darwin") return;
+
+    expect(sameLogGuardPathIdentity(
+      "/private/tmp/opencodex-log-guard/logs_2.sqlite",
+      "/tmp/opencodex-log-guard/logs_2.sqlite",
+    )).toBe(true);
+
+    const root = mkdtempSync(join(tmpdir(), "ocx-log-guard-cr-path-"));
+    roots.push(root);
+    const realParent = join(root, "real");
+    const aliasParent = join(root, "alias");
+    mkdirSync(realParent);
+    symlinkSync(realParent, aliasParent, "dir");
+
+    expect(sameLogGuardPathIdentity(
+      join(realParent, "logs_2.sqlite"),
+      join(aliasParent, "logs_2.sqlite"),
+    )).toBe(false);
   });
 
   test("successful mutation status honors a fresh unsupported inspection", () => {
@@ -116,11 +149,30 @@ describe("CodeRabbit protection regressions", () => {
 
     const result = unprotectCodexLogs(testDeps);
     expect(result.ok).toBe(true);
-    const inspect = new Database(databasePath, { readonly: true });
-    const owned = inspect.query<{ name: string }, []>(
-      "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'opencodex_log_guard_%'",
-    ).all();
-    inspect.close();
-    expect(owned).toEqual([]);
+    expect(reservedTriggers(databasePath)).toEqual([]);
+  });
+
+  test("config-write compensation restores every previously owned trigger definition", () => {
+    const { codexHome, databasePath } = fixture();
+    expect(protectCodexLogs("compat", deps(codexHome)).ok).toBe(true);
+
+    const db = new Database(databasePath);
+    db.exec(`
+      CREATE TRIGGER opencodex_log_guard_quiet_v1
+      BEFORE INSERT ON logs
+      WHEN upper(NEW.level) = 'TRACE'
+      BEGIN
+        SELECT RAISE(IGNORE);
+      END;
+    `);
+    db.close();
+    const before = reservedTriggers(databasePath);
+
+    const result = protectCodexLogs("quiet", deps(codexHome, () => {
+      throw new Error("disk full");
+    }));
+
+    expect(result).toEqual({ ok: false, error: "config_write_failed" });
+    expect(reservedTriggers(databasePath)).toEqual(before);
   });
 });

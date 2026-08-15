@@ -38,6 +38,21 @@ const CURRENT_LOG_SCHEMA: readonly CurrentLogColumn[] = [
   { name: "estimated_bytes", type: "INTEGER", notnull: 1, defaultValue: "0", pk: 0 },
 ] as const;
 
+const CURRENT_LOG_TABLE_SQL = `CREATE TABLE logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  ts_nanos INTEGER NOT NULL,
+  level TEXT NOT NULL,
+  target TEXT NOT NULL,
+  feedback_log_body TEXT,
+  module_path TEXT,
+  file TEXT,
+  line INTEGER,
+  thread_id TEXT,
+  process_uuid TEXT,
+  estimated_bytes INTEGER NOT NULL DEFAULT 0
+)`;
+
 export type CodexLogGuardCapabilityReason =
   | "database_missing"
   | "database_unreadable"
@@ -98,17 +113,19 @@ interface ColumnRow {
   dflt_value: string | null;
   pk: number;
 }
-interface SchemaObjectRow { type: string }
+interface SchemaObjectRow { type: string; sql: string | null }
 interface CountRow { n: number }
 interface LevelRow { level: string; rows: number }
 interface TargetRow { target: string; rows: number }
 interface EstimatedBytesRow { bytes: number | null }
 
-function isFile(path: string): boolean {
+type CanonicalTargetState = "missing" | "file" | "unusable";
+
+function canonicalTargetState(path: string): CanonicalTargetState {
   try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
+    return statSync(path).isFile() ? "file" : "unusable";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" ? "missing" : "unusable";
   }
 }
 
@@ -134,6 +151,10 @@ function normalizeDefault(value: string | null): string | null {
   return value === null ? null : String(value).trim();
 }
 
+function normalizeSchemaSql(sql: string | null | undefined): string {
+  return (sql ?? "").trim().replace(/;\s*$/, "").replace(/\s+/g, " ");
+}
+
 function sameColumns(columns: ColumnRow[]): boolean {
   if (columns.length !== CURRENT_LOG_SCHEMA.length) return false;
   return columns.every((column, index) => {
@@ -149,9 +170,11 @@ function sameColumns(columns: ColumnRow[]): boolean {
 
 function hasCurrentLogsTable(db: Database, columns: ColumnRow[]): boolean {
   const object = db.query<SchemaObjectRow, []>(
-    "SELECT type FROM sqlite_schema WHERE name = 'logs' LIMIT 1",
+    "SELECT type, sql FROM sqlite_schema WHERE name = 'logs' LIMIT 1",
   ).get();
-  return object?.type === "table" && sameColumns(columns);
+  return object?.type === "table"
+    && sameColumns(columns)
+    && normalizeSchemaSql(object.sql) === normalizeSchemaSql(CURRENT_LOG_TABLE_SQL);
 }
 
 function pragmaNumber(db: Database, pragma: "page_size" | "page_count" | "freelist_count"): number {
@@ -217,7 +240,7 @@ export function inspectCodexLogs(deps: CodexSqliteHomeDeps = {}): CodexLogGuardI
   const resolutionDeps: CodexSqliteHomeDeps = { ...deps, codexHome };
   const sqliteHome = resolveCodexSqliteHome(resolutionDeps);
   const databasePath = resolveCodexLogsDbPath(resolutionDeps);
-  const databaseExists = isFile(databasePath);
+  const targetState = canonicalTargetState(databasePath);
   const files = {
     databaseBytes: fileSize(databasePath),
     walBytes: fileSize(`${databasePath}-wal`),
@@ -231,8 +254,23 @@ export function inspectCodexLogs(deps: CodexSqliteHomeDeps = {}): CodexLogGuardI
     files,
   };
 
-  if (!databaseExists) {
+  if (targetState === "missing") {
     const schema: CodexLogGuardSchemaState = { state: "missing", reason: "database_missing" };
+    const mutation = capabilityFor(schema);
+    return {
+      ...common,
+      schema,
+      metrics: null,
+      capabilities: {
+        inspection: { state: "supported" },
+        protection: mutation,
+        reclaim: mutation,
+      },
+    };
+  }
+
+  if (targetState === "unusable") {
+    const schema: CodexLogGuardSchemaState = { state: "unreadable", reason: "database_unreadable" };
     const mutation = capabilityFor(schema);
     return {
       ...common,
