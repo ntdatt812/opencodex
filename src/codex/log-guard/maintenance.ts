@@ -28,7 +28,7 @@ const DEFAULT_BATCH_PAGES = 512;
 const DEFAULT_MAX_PAGES_PER_RUN = 8_192;
 const MAX_ITERATIONS = 64;
 
-type CompactStopReason = "complete" | "page_budget" | "no_progress";
+type CompactStopReason = "complete" | "page_budget" | "no_progress" | "busy";
 
 export interface CodexLogGuardCompactionMeasure {
   databaseBytes: number;
@@ -248,29 +248,54 @@ function runCompaction(
     let iterations = 0;
     let stopReason: CompactStopReason = previousFreelist === 0 ? "complete" : "page_budget";
 
+    const finish = (reason: CompactStopReason): CodexLogGuardCompactionResult => {
+      const after = measure(databasePath, db!, pageSize);
+      if (!quickCheckIsOk(quickCheck(db!))) {
+        return { ok: false, error: "integrity_check_failed", phase: "after" };
+      }
+      const complete = after.freelistPages === 0;
+      return {
+        ok: true,
+        report: {
+          pageSize,
+          before,
+          after,
+          pagesReclaimed,
+          physicalDatabaseBytesReclaimed: Math.max(0, before.databaseBytes - after.databaseBytes),
+          iterations,
+          complete,
+          stopReason: reason === "busy" ? "busy" : complete ? "complete" : reason,
+          integrity: { before: "ok", after: "ok" },
+        },
+      };
+    };
+
     while (previousFreelist > 0 && pagesReclaimed < maxPages && iterations < MAX_ITERATIONS) {
       const pageBudget = Math.min(batchPages, maxPages - pagesReclaimed, previousFreelist);
       if (pageBudget <= 0) {
         stopReason = "page_budget";
         break;
       }
+      const priorFreelist = previousFreelist;
       db.exec(`PRAGMA incremental_vacuum(${pageBudget})`);
       iterations += 1;
-      if (checkpointFull(db) === "busy") return { ok: false, error: "busy" };
+      const checkpoint = checkpointFull(db);
       const currentFreelist = pragmaNumber(db, "PRAGMA freelist_count");
-      const reclaimed = Math.max(0, previousFreelist - currentFreelist);
+      const reclaimed = Math.max(0, priorFreelist - currentFreelist);
       pagesReclaimed += reclaimed;
+      previousFreelist = currentFreelist;
+
+      // incremental_vacuum has already committed by this point. A busy FULL
+      // checkpoint is therefore a partial-success stop, not an atomic refusal.
+      if (checkpoint === "busy") return finish("busy");
       if (currentFreelist === 0) {
-        previousFreelist = 0;
         stopReason = "complete";
         break;
       }
-      if (currentFreelist >= previousFreelist) {
-        previousFreelist = currentFreelist;
+      if (currentFreelist >= priorFreelist) {
         stopReason = "no_progress";
         break;
       }
-      previousFreelist = currentFreelist;
       stopReason = "page_budget";
     }
 
@@ -283,29 +308,10 @@ function runCompaction(
     // One final FULL checkpoint backfills any remaining WAL frames before the
     // final main-database measurement. FULL does not reset or shrink the WAL
     // sidecar, so `after.walBytes` is an observational size, not reclaimed WAL.
-    if (checkpointFull(db) === "busy") return { ok: false, error: "busy" };
-    const after = measure(databasePath, db, pageSize);
-
-    if (!quickCheckIsOk(quickCheck(db))) {
-      return { ok: false, error: "integrity_check_failed", phase: "after" };
+    if (checkpointFull(db) === "busy") {
+      return iterations > 0 ? finish("busy") : { ok: false, error: "busy" };
     }
-
-    const complete = after.freelistPages === 0;
-    if (complete) stopReason = "complete";
-    return {
-      ok: true,
-      report: {
-        pageSize,
-        before,
-        after,
-        pagesReclaimed,
-        physicalDatabaseBytesReclaimed: Math.max(0, before.databaseBytes - after.databaseBytes),
-        iterations,
-        complete,
-        stopReason,
-        integrity: { before: "ok", after: "ok" },
-      },
-    };
+    return finish(stopReason);
   } catch (error) {
     if (probeOpen) {
       try { db?.exec("ROLLBACK"); } catch { /* close releases it */ }
