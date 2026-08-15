@@ -11,7 +11,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { compactCodexLogs } from "../src/codex/log-guard/maintenance";
+import {
+  compactCodexLogs,
+  type CodexLogGuardMaintenanceDeps,
+} from "../src/codex/log-guard/maintenance";
 
 const roots: string[] = [];
 
@@ -71,7 +74,10 @@ function scalar(path: string, pragma: string): number {
   }
 }
 
-function deps(codexHome: string, extra: Record<string, unknown> = {}) {
+function deps(
+  codexHome: string,
+  extra: Partial<CodexLogGuardMaintenanceDeps> = {},
+): CodexLogGuardMaintenanceDeps {
   return {
     codexHome,
     processCheck: () => ({ state: "ok" as const, processes: [] }),
@@ -137,24 +143,71 @@ describe("CodeRabbit Log Guard reclaim regressions", () => {
     expect(result.report.stopReason).toBe("page_budget");
   });
 
-  test("refuses compaction when a WAL reader prevents a FULL checkpoint", () => {
+  test("refuses compaction when a WAL reader prevents the initial FULL checkpoint", () => {
     const { codexHome, databasePath } = fixture();
     const reader = new Database(databasePath, { readonly: true });
-    reader.exec("BEGIN");
-    reader.query("SELECT count(*) AS n FROM logs").get();
-
-    const writer = new Database(databasePath);
-    writer.query(
-      "INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, estimated_bytes) VALUES (1, 0, 'INFO', 'test', NULL, 1)",
-    ).run();
-    writer.close();
-
+    let result;
     const beforeFreelist = scalar(databasePath, "PRAGMA freelist_count");
-    const result = compactCodexLogs(deps(codexHome));
-    reader.exec("ROLLBACK");
-    reader.close();
+    try {
+      reader.exec("BEGIN");
+      reader.query("SELECT count(*) AS n FROM logs").get();
 
-    expect(result).toEqual({ ok: false, error: "busy" });
-    expect(scalar(databasePath, "PRAGMA freelist_count")).toBe(beforeFreelist);
+      const writer = new Database(databasePath);
+      try {
+        writer.query(
+          "INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, estimated_bytes) VALUES (1, 0, 'INFO', 'test', NULL, 1)",
+        ).run();
+      } finally {
+        writer.close();
+      }
+
+      result = compactCodexLogs(deps(codexHome));
+      expect(result).toEqual({ ok: false, error: "busy" });
+      expect(scalar(databasePath, "PRAGMA freelist_count")).toBe(beforeFreelist);
+    } finally {
+      try { reader.exec("ROLLBACK"); } catch { /* close releases the read transaction */ }
+      reader.close();
+    }
+  });
+
+  test("reports a busy checkpoint as partial success after a vacuum batch commits", () => {
+    const { codexHome, databasePath } = fixture();
+    const testDeps = deps(codexHome);
+    let reader: Database | undefined;
+
+    Object.defineProperty(testDeps, "batchPages", {
+      enumerable: true,
+      get: () => {
+        if (!reader) {
+          reader = new Database(databasePath, { readonly: true });
+          reader.exec("BEGIN");
+          reader.query("SELECT count(*) AS n FROM logs").get();
+          const writer = new Database(databasePath);
+          try {
+            writer.query(
+              "INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, estimated_bytes) VALUES (2, 0, 'INFO', 'after-initial-checkpoint', NULL, 1)",
+            ).run();
+          } finally {
+            writer.close();
+          }
+        }
+        return 1;
+      },
+    });
+
+    try {
+      const result = compactCodexLogs(testDeps);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.report.iterations).toBe(1);
+      expect(result.report.pagesReclaimed).toBeGreaterThan(0);
+      expect(result.report.stopReason).toBe("busy");
+      expect(result.report.after.freelistPages).toBeLessThan(result.report.before.freelistPages);
+    } finally {
+      if (reader) {
+        try { reader.exec("ROLLBACK"); } catch { /* close releases the read transaction */ }
+        reader.close();
+      }
+    }
   });
 });
