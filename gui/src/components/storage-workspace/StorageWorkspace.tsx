@@ -120,6 +120,10 @@ function CodexLogGuardPanel({ report, locale, t }: { report: CodexLogGuardReport
           <dt><code>WAL</code></dt>
           <dd className="stw-kv-mono">{formatBytes(report.files.walBytes, locale)}</dd>
         </div>
+        <div className="stw-kv-row">
+          <dt><code>SHM</code></dt>
+          <dd className="stw-kv-mono">{formatBytes(report.files.shmBytes, locale)}</dd>
+        </div>
         {metrics && (
           <>
             <div className="stw-kv-row">
