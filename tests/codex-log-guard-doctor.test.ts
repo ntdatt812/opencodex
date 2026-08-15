@@ -8,7 +8,7 @@ function report(overrides: Partial<CodexLogGuardInspection> = {}): CodexLogGuard
     generatedAt: 1,
     externalSqliteHome: true,
     snapshot: "checkpointed",
-    files: { databaseBytes: 10 * 1024, walBytes: 2 * 1024, shmBytes: 0 },
+    files: { databaseBytes: 10 * 1024, walBytes: 2 * 1024, shmBytes: 3 * 1024 },
     schema: { state: "compatible" },
     capabilities: {
       inspection: { state: "supported" },
@@ -42,6 +42,9 @@ describe("Codex Log Guard doctor output", () => {
     expect(text).toContain("TRACE 50.0%");
     expect(text).toContain("reclaimable 4.0 KiB");
     expect(text).toContain("external sqlite_home");
+    expect(text).toContain("DB 10.0 KiB");
+    expect(text).toContain("WAL 2.0 KiB");
+    expect(text).toContain("SHM 3.0 KiB");
     expect(text).not.toContain("high write activity");
     expect(text).not.toContain("TBW");
     expect(text).not.toContain("NAND");
@@ -58,6 +61,25 @@ describe("Codex Log Guard doctor output", () => {
     }));
 
     expect(lines.join("\n")).toContain("unknown schema; inspection only");
+  });
+
+  test("reports file metadata for unreadable databases", () => {
+    const lines = formatCodexLogGuardDoctor(report({
+      files: { databaseBytes: 1024, walBytes: 2048, shmBytes: 4096 },
+      schema: { state: "unreadable", reason: "database_unreadable" },
+      capabilities: {
+        inspection: { state: "supported" },
+        protection: { state: "unsupported", reason: "database_unreadable" },
+        reclaim: { state: "unsupported", reason: "database_unreadable" },
+      },
+      metrics: null,
+    }));
+    const text = lines.join("\n");
+
+    expect(text).toContain("logs_2.sqlite is unreadable");
+    expect(text).toContain("DB 1.0 KiB");
+    expect(text).toContain("WAL 2.0 KiB");
+    expect(text).toContain("SHM 4.0 KiB");
   });
 
   test("reports a missing database as an informational absence", () => {
