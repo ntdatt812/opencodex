@@ -166,6 +166,64 @@ describe("Codex Log Guard inspection", () => {
     expect(report.capabilities.reclaim).toEqual({ state: "unsupported", reason: "unknown_schema" });
   });
 
+  test("refuses a same-name logs view as mutation-compatible", () => {
+    const root = makeRoot();
+    const codexHome = join(root, "codex-home");
+    const databasePath = join(codexHome, "logs_2.sqlite");
+    mkdirSync(codexHome);
+    writeFileSync(join(codexHome, "config.toml"), "");
+    createCurrentLogsDb(databasePath);
+    const db = new Database(databasePath);
+    db.exec(`
+      ALTER TABLE logs RENAME TO logs_source;
+      CREATE VIEW logs AS
+        SELECT id, ts, ts_nanos, level, target, feedback_log_body, module_path,
+               file, line, thread_id, process_uuid, estimated_bytes
+        FROM logs_source;
+    `);
+    db.close();
+
+    const report = inspectCodexLogs({ codexHome });
+
+    expect(report.schema).toEqual({ state: "unsupported", reason: "unknown_schema" });
+    expect(report.capabilities.protection).toEqual({ state: "unsupported", reason: "unknown_schema" });
+    expect(report.capabilities.reclaim).toEqual({ state: "unsupported", reason: "unknown_schema" });
+  });
+
+  test("refuses changed column types or constraints despite matching names", () => {
+    const root = makeRoot();
+    const codexHome = join(root, "codex-home");
+    const databasePath = join(codexHome, "logs_2.sqlite");
+    mkdirSync(codexHome);
+    writeFileSync(join(codexHome, "config.toml"), "");
+    createCurrentLogsDb(databasePath);
+    const db = new Database(databasePath);
+    db.exec(`
+      ALTER TABLE logs RENAME TO logs_source;
+      CREATE TABLE logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        ts_nanos INTEGER NOT NULL,
+        level BLOB NOT NULL,
+        target TEXT NOT NULL,
+        feedback_log_body TEXT,
+        module_path TEXT,
+        file TEXT,
+        line INTEGER,
+        thread_id TEXT,
+        process_uuid TEXT,
+        estimated_bytes INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    db.close();
+
+    const report = inspectCodexLogs({ codexHome });
+
+    expect(report.schema).toEqual({ state: "unsupported", reason: "unknown_schema" });
+    expect(report.capabilities.protection).toEqual({ state: "unsupported", reason: "unknown_schema" });
+    expect(report.capabilities.reclaim).toEqual({ state: "unsupported", reason: "unknown_schema" });
+  });
+
   test("reports a missing canonical database without falling back to logs_N", () => {
     const root = makeRoot();
     const codexHome = join(root, "codex-home");
