@@ -91,3 +91,35 @@ test("Storage overview localizes external and inspect-only labels", () => {
   expect(html).not.toContain("external sqlite_home");
   expect(html).not.toContain("/state/codex");
 });
+
+test("Storage overview renders a fixed localized inspection-failure state", () => {
+  const value = report();
+  value.codexLogs = null;
+  value.codexLogsError = "inspect_failed";
+
+  const html = renderToStaticMarkup(
+    <I18nContext.Provider value={{ locale: "de", setLocale: () => {}, t: germanT() }}>
+      <StorageWorkspace report={value} locale="de" />
+    </I18nContext.Provider>,
+  );
+
+  expect(html).toContain('data-testid="codex-log-guard-unavailable"');
+  expect(html).toContain("Die Diagnoseprotokoll-Inspektion ist nicht verfügbar.");
+  expect(html).not.toContain("inspect_failed");
+});
+
+test("Storage overview does not render arbitrary Log Guard error strings", () => {
+  const value = report();
+  value.codexLogs = null;
+  value.codexLogsError = "/private/state/logs_2.sqlite failed";
+
+  const html = renderToStaticMarkup(
+    <LanguageProvider>
+      <StorageWorkspace report={value} locale="en" />
+    </LanguageProvider>,
+  );
+
+  expect(html).not.toContain('data-testid="codex-log-guard-unavailable"');
+  expect(html).not.toContain("/private/state/logs_2.sqlite");
+  expect(html).not.toContain("failed");
+});
