@@ -41,7 +41,11 @@ function makeLogsDb(path: string): void {
   db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   db.close();
   for (const suffix of ["-wal", "-shm"]) {
-    try { unlinkSync(`${path}${suffix}`); } catch {}
+    try {
+      unlinkSync(`${path}${suffix}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error;
+    }
   }
 }
 
