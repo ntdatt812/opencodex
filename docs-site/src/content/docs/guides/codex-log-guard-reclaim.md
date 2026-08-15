@@ -42,7 +42,7 @@ Reclaim deliberately does **not**:
 - proceed on an unknown future log schema; or
 - continue after a failed SQLite integrity check.
 
-A busy Log Guard lock, busy SQLite writer/checkpoint, unsafe path, incompatible schema, non-incremental database, or integrity failure is returned as an explicit refusal rather than being retried in the background.
+A busy Log Guard lock, busy SQLite writer, or busy initial checkpoint is returned as an explicit refusal rather than being retried in the background. If checkpoint contention appears only after an incremental-vacuum batch has already committed, OpenCodex reports the work already completed as a successful partial result with `stopReason: "busy"` instead of claiming that nothing changed.
 
 ## CLI
 
@@ -87,7 +87,7 @@ Typical refusal states include:
 - `integrity_check_failed`
 - `database_error`
 
-Integrity failures include whether they occurred before or after the maintenance pass.
+Integrity failures include whether they occurred before or after the maintenance pass. A `busy` refusal means contention was detected before any vacuum batch committed; `stopReason: "busy"` inside a successful report means at least one batch committed before later checkpoint contention stopped the pass.
 
 ## Understanding the result
 
@@ -95,4 +95,4 @@ Integrity failures include whether they occurred before or after the maintenance
 
 Those numbers can differ. SQLite/WAL/filesystem behaviour means reclaiming logical pages does not guarantee an identical immediate physical-file reduction, and none of these metrics should be interpreted as NAND writes, SSD wear, or TBW consumed/saved.
 
-`complete: true` means the observed freelist reached zero. A partial result can stop because the per-run page budget was reached or because SQLite made no further progress in the bounded loop. Both are normal finite outcomes; neither causes an automatic retry.
+`complete: true` means the observed freelist reached zero. A partial result uses `stopReason: "page_budget"` when either the per-run page budget or the finite iteration cap ends the pass, `stopReason: "no_progress"` when SQLite stops reducing the freelist, and `stopReason: "busy"` when checkpoint contention appears after committed reclamation. All three are bounded outcomes; none causes an automatic retry.
