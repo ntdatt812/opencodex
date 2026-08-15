@@ -4,6 +4,13 @@ function kib(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KiB`;
 }
 
+function fileMetadataLines(report: CodexLogGuardInspection): string[] {
+  const location = report.externalSqliteHome ? "external sqlite_home" : "CODEX_HOME sqlite_home";
+  return [
+    `         ${location}; DB ${kib(report.files.databaseBytes)}, WAL ${kib(report.files.walBytes)}, SHM ${kib(report.files.shmBytes)}`,
+  ];
+}
+
 export function formatCodexLogGuardDoctor(report: CodexLogGuardInspection): string[] {
   const lines = ["Codex diagnostic logs"];
 
@@ -13,6 +20,8 @@ export function formatCodexLogGuardDoctor(report: CodexLogGuardInspection): stri
   }
   if (report.schema.state === "unreadable") {
     lines.push("  --     logs_2.sqlite is unreadable; inspection metadata only");
+    lines.push(...fileMetadataLines(report));
+    lines.push("         checkpointed read-only snapshot; activity rate not measured");
     return lines;
   }
   if (report.schema.state === "unsupported") {
@@ -21,8 +30,7 @@ export function formatCodexLogGuardDoctor(report: CodexLogGuardInspection): stri
     lines.push("  ok     schema compatible");
   }
 
-  const location = report.externalSqliteHome ? "external sqlite_home" : "CODEX_HOME sqlite_home";
-  lines.push(`         ${location}; DB ${kib(report.files.databaseBytes)}, WAL ${kib(report.files.walBytes)}`);
+  lines.push(...fileMetadataLines(report));
 
   if (report.metrics) {
     lines.push(
