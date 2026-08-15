@@ -44,8 +44,6 @@ function report(reclaimableBytes = 65536): StorageReport {
     buckets: [],
     codexLogs: {
       generatedAt: 1,
-      sqliteHome: "/home/user/.codex",
-      databasePath: "/home/user/.codex/logs_2.sqlite",
       externalSqliteHome: false,
       snapshot: "checkpointed",
       files: { databaseBytes: 8192, walBytes: 0, shmBytes: 0 },
@@ -69,7 +67,7 @@ function report(reclaimableBytes = 65536): StorageReport {
         estimatedLogBytes: null,
       },
     },
-  } as StorageReport;
+  } satisfies StorageReport;
 }
 
 async function mount(value: StorageReport, onAction: (action: unknown) => void): Promise<HTMLDivElement> {
