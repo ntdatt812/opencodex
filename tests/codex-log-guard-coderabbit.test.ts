@@ -96,12 +96,16 @@ describe("CodeRabbit protection regressions", () => {
     expect(status.protection).toEqual({ desiredMode: "off", observedMode: "collision", state: "unknown" });
   });
 
-  test("Darwin accepts only the trusted system alias and rejects an arbitrary ancestor symlink", () => {
+  test("Darwin accepts only trusted system aliases and rejects an arbitrary ancestor symlink", () => {
     if (process.platform !== "darwin") return;
 
     expect(sameLogGuardPathIdentity(
       "/private/tmp/opencodex-log-guard/logs_2.sqlite",
       "/tmp/opencodex-log-guard/logs_2.sqlite",
+    )).toBe(true);
+    expect(sameLogGuardPathIdentity(
+      "/private/var/tmp/opencodex-log-guard/logs_2.sqlite",
+      "/var/tmp/opencodex-log-guard/logs_2.sqlite",
     )).toBe(true);
 
     const root = mkdtempSync(join(tmpdir(), "ocx-log-guard-cr-path-"));
